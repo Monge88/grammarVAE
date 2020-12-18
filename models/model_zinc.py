@@ -1,20 +1,25 @@
 import copy
+
+import tensorflow as tf
 from keras import backend as K
 from keras import objectives
 from keras.models import Model
 from keras.layers import Input, Dense, Lambda
-from keras.layers.core import Dense, Activation, Flatten, RepeatVector
+from keras.layers.core import Activation, Flatten, RepeatVector
 from keras.layers.wrappers import TimeDistributed
 from keras.layers.recurrent import GRU
 from keras.layers.convolutional import Convolution1D
-import tensorflow as tf
+from keras.utils import plot_model
 import zinc_grammar as G
+
+#tf.config.run_functions_eagerly(True)
+
 
 # helper variables in Keras format for parsing the grammar
 masks_K      = K.variable(G.masks)
 ind_of_ind_K = K.variable(G.ind_of_ind)
 
-MAX_LEN = 277
+MAX_LEN = 70
 DIM = G.D
 
 
@@ -30,7 +35,7 @@ class MoleculeVAE():
         charset_length = len(charset)
         
         x = Input(shape=(max_length, charset_length))
-        _, z = self._buildEncoder(x, latent_rep_size, max_length)
+        _, z = self._buildEncoder(x, latent_rep_size, charset_length, max_length)
         self.encoder = Model(x, z)
 
         encoded_input = Input(shape=(latent_rep_size,))
@@ -45,7 +50,7 @@ class MoleculeVAE():
         )
 
         x1 = Input(shape=(max_length, charset_length))
-        vae_loss, z1 = self._buildEncoder(x1, latent_rep_size, max_length)
+        vae_loss, z1 = self._buildEncoder(x1, latent_rep_size, charset_length, max_length)
         self.autoencoder = Model(
             x1,
             self._buildDecoder(
@@ -58,8 +63,8 @@ class MoleculeVAE():
 
         # for obtaining mean and log variance of encoding distribution
         x2 = Input(shape=(max_length, charset_length))
-        (z_m, z_l_v) = self._encoderMeanVar(x2, latent_rep_size, max_length)
-        self.encoderMV = Model(input=x2, output=[z_m, z_l_v])
+        (z_m, z_l_v) = self._encoderMeanVar(x2, latent_rep_size)
+        self.encoderMV = Model(x2, [z_m, z_l_v])  # Alterei Model(input=x2, output=[z_m, z_l_v]) para Model(x2, [z_m, z_l_v])
 
         if weights_file:
             self.autoencoder.load_weights(weights_file)
@@ -69,10 +74,18 @@ class MoleculeVAE():
 
         self.autoencoder.compile(optimizer = 'Adam',
                                  loss = vae_loss,
-                                 metrics = ['accuracy'])
+                                 metrics = ['accuracy']
+                                 )
+                                 
+        
+        print(self.autoencoder.summary())
+       # plot_model(self.autoencoder, to_file='models_structure/autoencoder.png', show_shapes=True, show_layer_names=True)
+        #plot_model(self.encoder, to_file='models_structure/encoder.png', show_shapes=True, show_layer_names=True)
+        #plot_model(self.decoder, to_file='models_structure/decoder.png', show_shapes=True, show_layer_names=True)
+        #plot_model(self.encoderMV, to_file='models_structure/encoderMV.png', show_shapes=True, show_layer_names=True)
 
 
-    def _encoderMeanVar(self, x, latent_rep_size, max_length, epsilon_std = 0.01):
+    def _encoderMeanVar(self, x, latent_rep_size, epsilon_std = 0.01):
         h = Convolution1D(9, 9, activation = 'relu', name='conv_1')(x)
         h = Convolution1D(9, 9, activation = 'relu', name='conv_2')(h)
         h = Convolution1D(10, 11, activation = 'relu', name='conv_3')(h)
@@ -91,11 +104,11 @@ class MoleculeVAE():
         h = Convolution1D(10, 11, activation = 'relu', name='conv_3')(h)
         h = Flatten(name='flatten_1')(h)
         h = Dense(435, activation = 'relu', name='dense_1')(h)
-
+        
         def sampling(args):
             z_mean_, z_log_var_ = args
             batch_size = K.shape(z_mean_)[0]
-            epsilon = K.random_normal(shape=(batch_size, latent_rep_size), mean=0., std = epsilon_std)
+            epsilon = K.random_normal(shape=(batch_size, latent_rep_size), mean=0., stddev = epsilon_std)  # Alterei std para stddev
             return z_mean_ + K.exp(z_log_var_ / 2) * epsilon
 
         z_mean = Dense(latent_rep_size, name='z_mean', activation = 'linear')(h)
@@ -111,8 +124,8 @@ class MoleculeVAE():
             ix2 = tf.cast(ix2, tf.int32) # cast indices as ints 
             M2 = tf.gather_nd(masks_K, ix2) # get slices of masks_K with indices
             M3 = tf.reshape(M2, [-1,MAX_LEN,DIM]) # reshape them
-            P2 = tf.mul(K.exp(x_pred),M3) # apply them to the exp-predictions
-            P2 = tf.div(P2,K.sum(P2,axis=-1,keepdims=True)) # normalize predictions
+            P2 = tf.multiply(K.exp(x_pred),M3) # apply them to the exp-predictions
+            P2 = tf.truediv(P2,K.sum(P2,axis=-1,keepdims=True)) # normalize predictions
             return P2
 
         def vae_loss(x, x_decoded_mean):
@@ -136,5 +149,5 @@ class MoleculeVAE():
     def save(self, filename):
         self.autoencoder.save_weights(filename)
     
-    def load(self, charset, weights_file, latent_rep_size = 2, max_length=MAX_LEN):
+    def load(self, charset, weights_file, latent_rep_size = 56, max_length=MAX_LEN):
         self.create(charset, max_length = max_length, weights_file = weights_file, latent_rep_size = latent_rep_size)
